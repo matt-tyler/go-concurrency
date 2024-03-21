@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"fmt"
 
 	"golang.org/x/sync/errgroup"
-)
 
+	"example.com/m/runner"
+)
 
 func makeChan[T any]() chan T {
 	c := make(chan T, 10)
@@ -247,17 +249,18 @@ func moreNumbers(ctx context.Context, n int) <-chan int {
 }
 
 func main() {
-	// do something
+
+	// group, ctx := errgroup.WithContext(context.Background())
+
+	r := runner.WithContext(context.Background())
+
 	ch := makeChan[int]()
-
-	group, ctx := errgroup.WithContext(context.Background())
-
-	group.Go(func() error {
-		for i := range 20 {
+	r.Go(func() error {
+		defer close(ch)
+		for i := range 5 {
 			ch <- i
 			time.Sleep(1 * time.Second)
 		}
-		close(ch)
 		return nil
 	})
 
@@ -266,10 +269,10 @@ func main() {
 	// }
 
 	// out, callback := ParallelMap(ctx, ch, 3, plusOne)
-	out, callback := ParallelChain(ctx, ch, 3, moreNumbers)
+	out := runner.ParallelChain(r, ch, 3, moreNumbers)
 
-	group.Go(callback)
-	group.Go(sink(ctx, out, os.Stdout))
+	// group.Go(callback)
+	r.Go(sink[int](r.Context(), out, os.Stdout))
 
-	group.Wait()
+	r.Wait()
 }
