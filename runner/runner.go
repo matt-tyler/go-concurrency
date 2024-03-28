@@ -6,6 +6,17 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+
+type Processor[T, U any] interface {
+	Start(ctx context.Context, t T) <-chan U
+}
+
+type ProcessorFunc[T, U any] func(ctx context.Context, t T) <-chan U
+
+func (f ProcessorFunc[T, U]) Start(ctx context.Context, t T) <-chan U {
+	return f(ctx, t)
+}
+
 type Runner struct {
 	ctx context.Context
 	group *errgroup.Group
@@ -41,12 +52,12 @@ func ParallelMap[T, U any](r *Runner, ch <-chan T, n int, fn func(t T) (U, error
 // fn applied to the values in the input channel. It takes a parameter n that
 // specifies the number of goroutines to use. ParallelChain differs from ParallelMap
 // in that the function fn returns a channel of values rather than a single value.
-func ParallelChain[T, U any](r *Runner, ch <-chan T, n int, fn func(ctx context.Context, t T) <-chan U) <-chan U {
+func ParallelChain[T, U any](r *Runner, ch <-chan T, n int, processor Processor[T, U]) <-chan U {
 	fanOut := FanOut(r, ch, n, Identity)
 	us := make([]<-chan U, n)
 
 	for i := range us {
-		u := Chain(r, fanOut[i], fn)
+		u := Chain(r, fanOut[i], processor)
 		us[i] = u
 	}
 
@@ -61,7 +72,7 @@ func Identity[T any](t T) (T, error) {
 // Chain returns a channel that will receive the results of the function
 // fn applied to the values in the input channel. The function fn returns a channel
 // of values rather than a single value.
-func Chain[T, U any](r *Runner, ch <-chan T, fn func(ctx context.Context, t T) <-chan U) <-chan U  {
+func Chain[T, U any](r *Runner, ch <-chan T, processor Processor[T, U]) <-chan U  {
 	out := make(chan U)
 	ctx := r.Context()
 	r.Go(func() error {
@@ -70,7 +81,7 @@ func Chain[T, U any](r *Runner, ch <-chan T, fn func(ctx context.Context, t T) <
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			u := fn(ctx, v)
+			u := processor.Start(ctx, v)
 			for v := range OrDone(ctx, u) {
 				if ctx.Err() != nil {
 					return ctx.Err()

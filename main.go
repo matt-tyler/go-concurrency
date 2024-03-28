@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"fmt"
 
 	"golang.org/x/sync/errgroup"
 
@@ -269,7 +268,7 @@ func main() {
 	// }
 
 	// out, callback := ParallelMap(ctx, ch, 3, plusOne)
-	out := runner.ParallelChain(r, ch, 3, moreNumbers)
+	out := runner.ParallelChain(r, ch, 3, runner.ProcessorFunc[int, int](moreNumbers))
 
 	// group.Go(callback)
 	r.Go(sink[int](r.Context(), out, os.Stdout))
