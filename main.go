@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"time"
 	"encoding/json"
 	"io"
 	"os"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"example.com/m/jsonl"
 	"example.com/m/runner"
 )
 
@@ -41,30 +42,6 @@ func OrDone[T any](ctx context.Context, ch <-chan T) <-chan T {
 		}
 	}()
 	return out
-}
-
-// return a receiver channel and a function that starts a goroutine to write to the channel
-
-// func source[T any](ctx context.Context) (chan<- T, fn) {
-//
-// }
-//
-func m[T, U any](ctx context.Context, ch <-chan T, fn func(t T) (U, error)) (<-chan U, fn) {
-	out := make(chan U)
-	return out, func() error {
-		defer close(out)
-		for v := range OrDone(ctx, ch) {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			u, err := fn(v)
-			if err != nil {
-				return err
-			}
-			out <- u
-		}
-		return nil
-	}
 }
 
 // ParallelMap returns a channel that will receive the results of the function
@@ -184,7 +161,6 @@ func FanIn[T any](ctx context.Context, cs []<-chan T) (<-chan T, func() error) {
 	return out, fn
 }
 
-
 // convert to json and write to w
 func sink[T any](ctx context.Context, ch <-chan T, w io.Writer) fn {
 	return func() error {
@@ -206,10 +182,9 @@ func sink[T any](ctx context.Context, ch <-chan T, w io.Writer) fn {
 	}
 }
 
-
 type x struct {
 	ctx context.Context
-	ch <-chan any
+	ch  <-chan any
 }
 
 func (x *x) WriterTo(w io.Writer) (int64, error) {
@@ -230,25 +205,29 @@ func (x *x) WriterTo(w io.Writer) (int64, error) {
 	}
 }
 
-func moreNumbers(ctx context.Context, n int) <-chan int {
+func moreNumbers(ctx context.Context, in <-chan int) (<-chan int, func() error) {
 	out := make(chan int)
-
-	go func() {
+	fn := func() error {
 		defer close(out)
-		x := n * 1000
-		for i := 0; i < n; i++ {
-			select {
-			case <-ctx.Done():
-			return
-			case out <- x + i:
+		for n := range OrDone(ctx, in) {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			x := n * 1000
+			for i := 0; i < n; i++ {
+				select {
+				case <-ctx.Done():
+					return nil
+				case out <- x + i:
+				}
 			}
 		}
-	}()
-	return out
+		return nil
+	}
+	return out, fn
 }
 
 func main() {
-
 	// group, ctx := errgroup.WithContext(context.Background())
 
 	r := runner.WithContext(context.Background())
@@ -270,8 +249,11 @@ func main() {
 	// out, callback := ParallelMap(ctx, ch, 3, plusOne)
 	out := runner.ParallelChain(r, ch, 3, runner.ProcessorFunc[int, int](moreNumbers))
 
-	// group.Go(callback)
-	r.Go(sink[int](r.Context(), out, os.Stdout))
+	w := jsonl.Encode[int](os.Stdout)
+	out2 := runner.ParallelMap(r, out, 1, w)
 
-	r.Wait()
+	// group.Go(callback)
+	r.Go(sink[int](r.Context(), out2, io.Discard))
+
+	_ = r.Wait()
 }

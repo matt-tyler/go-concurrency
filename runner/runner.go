@@ -7,13 +7,14 @@ import (
 )
 
 
+
 type Processor[T, U any] interface {
-	Start(ctx context.Context, t T) <-chan U
+	Spawn(ctx context.Context, t <-chan T) (<-chan U, func() error)
 }
 
-type ProcessorFunc[T, U any] func(ctx context.Context, t T) <-chan U
+type ProcessorFunc[T, U any] func(ctx context.Context, t <-chan T) (<-chan U, func() error)
 
-func (f ProcessorFunc[T, U]) Start(ctx context.Context, t T) <-chan U {
+func (f ProcessorFunc[T, U]) Spawn(ctx context.Context, t <-chan T) (<-chan U, func() error) {
 	return f(ctx, t)
 }
 
@@ -38,6 +39,23 @@ func (r *Runner) Wait() error {
 func (r *Runner) Context() context.Context {
 	return r.ctx
 }
+
+func Consume[T any](r *Runner, ch <-chan T) {
+	r.Go(func() error {
+		ctx := r.Context()
+		for {
+			select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case _, ok := <-ch:
+					if !ok {
+						return nil
+					}
+			}
+		}
+	})
+}
+
 
 // ParallelMap returns a channel that will receive the results of the function
 // fn applied to the values in the input channel. It takes a parameter n that
@@ -73,24 +91,9 @@ func Identity[T any](t T) (T, error) {
 // fn applied to the values in the input channel. The function fn returns a channel
 // of values rather than a single value.
 func Chain[T, U any](r *Runner, ch <-chan T, processor Processor[T, U]) <-chan U  {
-	out := make(chan U)
 	ctx := r.Context()
-	r.Go(func() error {
-		defer close(out)
-		for v := range OrDone(ctx, ch) {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			u := processor.Start(ctx, v)
-			for v := range OrDone(ctx, u) {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				out <- v
-			}
-		}
-		return nil
-	})
+	out, fn := processor.Spawn(ctx, ch)
+	r.Go(fn)
 	return out
 }
 
