@@ -3,10 +3,9 @@ package runner
 import (
 	"context"
 	"sync"
+
 	"golang.org/x/sync/errgroup"
 )
-
-
 
 type Processor[T, U any] interface {
 	Spawn(ctx context.Context, t <-chan T) (<-chan U, func() error)
@@ -19,43 +18,40 @@ func (f ProcessorFunc[T, U]) Spawn(ctx context.Context, t <-chan T) (<-chan U, f
 }
 
 type Runner struct {
-	ctx context.Context
+	ctx   context.Context
 	group *errgroup.Group
 }
 
+// WithContext creates a new Runner with the given context.
 func WithContext(ctx context.Context) *Runner {
 	group, ctx := errgroup.WithContext(ctx)
 	return &Runner{ctx: ctx, group: group}
 }
 
+// Go runs the function fn in a goroutine. It returns immediately.
 func (r *Runner) Go(fn func() error) {
 	r.group.Go(fn)
 }
 
+// Wait for all goroutines to finish. It returns the first error that caused the termination.
+// If the context is done, it returns the context error.
 func (r *Runner) Wait() error {
 	return r.group.Wait()
 }
 
+// Context returns the context of the runner
 func (r *Runner) Context() context.Context {
 	return r.ctx
 }
 
+// Consume reads values from the input channel until it is closed or the context is done.
 func Consume[T any](r *Runner, ch <-chan T) {
-	r.Go(func() error {
+	fn := func() error {
 		ctx := r.Context()
-		for {
-			select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case _, ok := <-ch:
-					if !ok {
-						return nil
-					}
-			}
-		}
-	})
+		return drain(ctx, ch)
+	}
+	r.Go(fn)
 }
-
 
 // ParallelMap returns a channel that will receive the results of the function
 // fn applied to the values in the input channel. It takes a parameter n that
@@ -90,7 +86,7 @@ func Identity[T any](t T) (T, error) {
 // Chain returns a channel that will receive the results of the function
 // fn applied to the values in the input channel. The function fn returns a channel
 // of values rather than a single value.
-func Chain[T, U any](r *Runner, ch <-chan T, processor Processor[T, U]) <-chan U  {
+func Chain[T, U any](r *Runner, ch <-chan T, processor Processor[T, U]) <-chan U {
 	ctx := r.Context()
 	out, fn := processor.Spawn(ctx, ch)
 	r.Go(fn)
@@ -110,22 +106,13 @@ func FanOut[T any, U any](r *Runner, ch <-chan T, n int, fn func(t T) (U, error)
 
 		r.Go(func() error {
 			defer close(cs[i])
-			for v := range OrDone(ctx, ch) {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				u, err := fn(v)
-				if err != nil {
-					return err
-				}
-				cs[i] <- u
-			}
-			return nil
+			return pipeMap(ctx, ch, cs[i], fn)
 		})
 	}
 	return result
 }
 
+// FanIn returns a channel that will receive the values from the input channels.
 func FanIn[T any](r *Runner, cs []<-chan T) <-chan T {
 	out := make(chan T)
 
@@ -139,19 +126,78 @@ func FanIn[T any](r *Runner, cs []<-chan T) <-chan T {
 	})
 
 	ctx := r.Context()
+
 	for i := range cs {
-		r.Go(func() error {
+		fn := func() error {
 			defer wg.Done()
-			for v := range OrDone(ctx, cs[i]) {
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				out <- v
-			}
-			return nil
-		})
+			return pipe(ctx, cs[i], out)
+		}
+		r.Go(fn)
 	}
 	return out
+}
+
+// pipeMap applies the function fn to the values in the input channel and sends the results to the output channel.
+// It returns the error that caused the termination.
+// This is a blocking operation and should be run in a goroutine.
+func pipeMap[T any, U any](ctx context.Context, in <-chan T, out chan<- U, fn func(t T) (U, error)) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case v, ok := <-in:
+			if !ok {
+				return nil
+			}
+
+			u, err := fn(v)
+			if err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case out <- u:
+			}
+		}
+	}
+}
+
+// pipe copies values from the input channel to the output channel until the input channel is closed
+// or the context is done. It returns the error that caused the termination.
+// This is a blocking operation and should be run in a goroutine.
+func pipe[T any](ctx context.Context, in <-chan T, out chan<- T) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case v, ok := <-in:
+			if !ok {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case out <- v:
+			}
+		}
+	}
+}
+
+// drain reads values from the input channel until it is closed or the context is done.
+// It returns the error that caused the termination.
+// This is a blocking operation and should be run in a goroutine.
+func drain[T any](ctx context.Context, in <-chan T) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case _, ok := <-in:
+			if !ok {
+				return nil
+			}
+		}
+	}
 }
 
 // orDone returns a channel that will be closed when either the input channel is closed or the context is done
